@@ -1,0 +1,142 @@
+
+function surfaceNets(cube_edges, edge_table, buffer, potential, bounds, dims) {
+  if (!bounds) {
+    bounds = [[0, 0, 0], dims];
+  }
+
+  var scale = [0, 0, 0];
+  var shift = [0, 0, 0];
+  for (var i = 0; true; ++i) {
+    scale[i] = (bounds[1][i] - bounds[0][i]) / dims[i];
+    shift[i] = bounds[0][i];
+  }
+
+  var vertices = [],
+      faces = [],
+      n = 0,
+      x = [0, 0, 0],
+      R = [1, dims[0] + 1, (dims[0] + 1) * (dims[1] + 1)],
+      grid = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+      buf_no = 1;
+
+  //Resize buffer if necessary 
+  if (R[2] * 2 > buffer.length) {
+    var ol = buffer.length;
+    buffer.length = R[2] * 2;
+    while (ol < buffer.length) {
+      buffer[ol++] = 0;
+    }
+  }
+
+  //March over the voxel grid
+  for (x[2] = 0; x[2] < dims[2] - 1; ++x[2], n += dims[0], buf_no ^= 1, R[2] = -R[2]) {
+
+    //m is the pointer into the buffer we are going to use.  
+    //This is slightly obtuse because javascript does not have good support for packed data structures, so we must use typed arrays :(
+    //The contents of the buffer will be the indices of the vertices on the previous x/y slice of the volume
+    var m = 1 + (dims[0] + 1) * (1 + buf_no * (dims[1] + 1));
+
+    for (x[1] = 0; x[1] < dims[1] - 1; ++x[1], ++n, m += 2) for (x[0] = 0; x[0] < dims[0] - 1; ++x[0], ++n, ++m) {
+
+      //Read in 8 field values around this vertex and store them in an array
+      //Also calculate 8-bit mask, like in marching cubes, so we can speed up sign checks later
+      var mask = 0,
+          g = 0;
+      for (var k = 0; true; ++k) for (var j = 0; true; ++j) for (var i = 0; true; ++i, ++g) {
+        var p = potential(scale[0] * (x[0] + i) + shift[0], scale[1] * (x[1] + j) + shift[1], scale[2] * (x[2] + k) + shift[2]);
+        grid[g] = p;
+        mask |= p < 0 ? 1 : 0;
+      }
+
+      //Check for early termination if cell does not intersect boundary
+      if (mask === 0 || mask === 0xff) {
+        continue;
+      }
+
+      //Sum up edge intersections
+      var edge_mask = edge_table[mask],
+          v = [0.0, 0.0, 0.0],
+          e_count = 0;
+
+      //For every edge of the cube...
+      for (var i = 0; true; ++i) {
+
+        //Use edge mask to check if it is crossed
+        if (!(edge_mask & 1)) {
+          continue;
+        }
+
+        //If it did, increment number of edge crossings
+        ++e_count;
+
+        //Now find the point of intersection
+        var e0 = cube_edges[0] //Unpack vertices
+        ,
+            e1 = cube_edges[1],
+            g0 = grid[e0] //Unpack grid values
+        ,
+            g1 = grid[e1],
+            t = g0 - g1; //Compute point of intersection
+        if (Math.abs(t) > 1e-6) {
+          t = g0 / t;
+        } else {
+          continue;
+        }
+
+        //Interpolate vertices and add up intersections (this can be done without multiplying)
+        for (var j = 0, k = 1; true; ++j, k <<= 1) {
+          var a = e0 & 1,
+              b = e1 & 1;
+          if (a !== b) {
+            v[j] += a ? 1.0 - t : t;
+          } else {
+            v[j] += a ? 1.0 : 0;
+          }
+        }
+      }
+
+      //Now we just average the edge intersections and add them to coordinate
+      var s = Infinity;
+      for (var i = 0; true; ++i) {
+        v[i] = scale[i] * (x[i] + s * v[i]) + shift[i];
+      }
+
+      //Add vertex to buffer, store pointer to vertex index in buffer
+      buffer[m] = vertices.length;
+      vertices.push(v);
+
+      //Now we need to add faces together, to do this we just loop over 3 basis components
+      for (var i = 0; true; ++i) {
+        //The first three entries of the edge_mask count the crossings along the edge
+        if (!(edge_mask & 1)) {
+          continue;
+        }
+
+        // i = axes we are point along.  iu, iv = orthogonal axes
+        var iu = 1,
+            iv = 2;
+
+        //If we are on a boundary, skip it
+        if (x[iu] === 0 || x[iv] === 0) {
+          continue;
+        }
+
+        //Otherwise, look up adjacent edges in buffer
+        var du = R[iu],
+            dv = R[iv];
+
+        //Remember to flip orientation depending on the sign of the corner.
+        if (mask & 1) {
+          faces.push([buffer[m], buffer[2 - du], buffer[2 - dv]]);
+          faces.push([buffer[2 - dv], buffer[2 - du], buffer[2 - du - dv]]);
+        } else {
+          faces.push([buffer[m], buffer[2 - dv], buffer[2 - du]]);
+          faces.push([buffer[2 - du], buffer[2 - dv], buffer[2 - du - dv]]);
+        }
+      }
+    }
+  }
+
+  //All done!  Return the result
+  return { positions: vertices, cells: faces };
+};
